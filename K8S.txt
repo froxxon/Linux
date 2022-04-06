@@ -1,0 +1,119 @@
+https://www.linuxtechi.com/how-to-install-kubernetes-cluster-rhel/
+https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/high-availability/
+
+echo export 'PS1="\[\e[1;32m\][\u@\h \W]\$\[\e[m\] "' | sudo tee -a .bash_profile > /dev/null
+sudo dnf update -y
+sudo swapoff -a
+sudo nano /etc/fstab
+disable lines with "swap"
+
+sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+sudo nano /etc/hosts
+192.168.80.120 kubernetes          // For control plane endpoint
+#192.168.80.130 k8smaster1          // For node Master1
+192.168.80.131 k8smaster2          // For node Master2
+192.168.80.132 k8smaster3          // For node Master3
+192.168.80.133 k8shost1            // For node Host1
+192.168.80.134 k8shost2            // For node Host2
+192.168.80.135 k8shost3            // For node Host3
+
+sudo dnf install -y iproute-tc
+
+on Master nodes:
+sudo firewall-cmd --permanent --add-port=6443/tcp
+sudo firewall-cmd --permanent --add-port=2379-2380/tcp
+sudo firewall-cmd --permanent --add-port=10250/tcp
+sudo firewall-cmd --permanent --add-port=10251/tcp
+sudo firewall-cmd --permanent --add-port=10252/tcp
+sudo firewall-cmd --reload
+
+on Worker nodes:
+sudo firewall-cmd --permanent --add-port=10250/tcp
+sudo firewall-cmd --permanent --add-port=30000-32767/tcp
+sudo firewall-cmd --reload
+
+Add Container Runtime Interface (CRI)
+sudo nano /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+sudo nano /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+
+sudo sysctl --system
+export VERSION=1.22
+sudo curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable/CentOS_8/devel:kubic:libcontainers:stable.repo
+sudo curl -L -o /etc/yum.repos.d/devel:kubic:libcontainers:stable:cri-o:${VERSION}.repo https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:${VERSION}/CentOS_8/devel:kubic:libcontainers:stable:cri-o:${VERSION}.repo
+sudo dnf install cri-o cri-tools -y
+
+sudo nano /etc/crio/crio.conf
+[crio.runtime]
+conmon_cgroup = "pod"
+cgroup_manager = "cgroupfs"
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now crio
+sudo nano /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+exclude=kubelet kubeadm kubectl
+
+sudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+sudo systemctl enable --now kubelet
+sudo systemctl status kubelet
+
+--- First Master node ---
+sudo kubeadm init --pod-network-cidr=172.16.10.0/16 --control-plane-endpoint "kubernetes.froxxen.com:6443" --upload-certs
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+# sudo kubectl -n kube-system edit cm kubeadm-config
+# sudo kubectl -n kube-system get cm kubeadm-config -oyaml
+# sudo kubeadm token create --print-join-command
+
+--- join master ---
+sudo kubeadm join kubernetes.froxxen.com:6443 --token r9c07v.swa1bf7d9whyp7cg \
+        --discovery-token-ca-cert-hash sha256:bb5e0f41fdee1c294ad580b8154aac32126e96a97c16ae854c9018624bb82c4c \
+        --control-plane --certificate-key 4d7624662e05848bb3a3508f02ec3906247fd25e0ed059cc7cc7656b76e340e2
+
+--- Join worker ---
+sudo kubeadm join kubernetes.froxxen.com:6443 --token r9c07v.swa1bf7d9whyp7cg \
+        --discovery-token-ca-cert-hash sha256:bb5e0f41fdee1c294ad580b8154aac32126e96a97c16ae854c9018624bb82c4c
+
+--- Install Calico Pod Network Add-on ---
+kubectl create -f https://docs.projectcalico.org/manifests/tigera-operator.yaml
+kubectl create -f https://docs.projectcalico.org/manifests/custom-resources.yaml
+watch kubectl get pods -n calico-system
+kubectl get nodes
+kubectl get nodes -o wide
+kubectl get pod -n kube-system -w
+kubectl get pods --all-namespaces
+
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.5.0/aio/deploy/recommended.yaml
+kubectl edit service/kubernetes-dashboard -n kubernetes-dashboard
+change type: ClusterIP to NodePort
+kubectl delete pod kubernetes-dashboard-546cbc58cd-6ln9x -n kubernetes-dashboard
+kubectl get services--all-namespaces
+kubectl create serviceaccount dashboard -n kubernetes-dashboard 
+kubectl describe secret dashboard-token-jczm5 -n kubernetes-dashboard
+copy the token, used for login later
+kubectl create clusterrolebinding dashboard-admin -n kubernetes-dashboard  --clusterrole=cluster-admin  --serviceaccount=default:dashboard
+
+https://k8smaster1.froxxen.com/#/login
+
+token
+ZXlKaGJHY2lPaUpTVXpJMU5pSXNJbXRwWkNJNklteEJORTlNYlhoaFdIcE9RbTR6Y21RMU5XcHVZV2hGT1RKWFYyNHlTblppWkdsUmEwaEJhRVp5TlVVaWZRLmV5SnBjM01pT2lKcmRXSmxjbTVsZEdWekwzTmxjblpwWTJWaFkyTnZkVzUwSWl3aWEzVmlaWEp1WlhSbGN5NXBieTl6WlhKMmFXTmxZV05qYjNWdWRDOXVZVzFsYzNCaFkyVWlPaUpyZFdKbGNtNWxkR1Z6TFdSaGMyaGliMkZ5WkNJc0ltdDFZbVZ5Ym1WMFpYTXVhVzh2YzJWeWRtbGpaV0ZqWTI5MWJuUXZjMlZqY21WMExtNWhiV1VpT2lKa1lYTm9ZbTloY21RdGRHOXJaVzR0YW1ONmJUVWlMQ0pyZFdKbGNtNWxkR1Z6TG1sdkwzTmxjblpwWTJWaFkyTnZkVzUwTDNObGNuWnBZMlV0WVdOamIzVnVkQzV1WVcxbElqb2laR0Z6YUdKdllYSmtJaXdpYTNWaVpYSnVaWFJsY3k1cGJ5OXpaWEoyYVdObFlXTmpiM1Z1ZEM5elpYSjJhV05sTFdGalkyOTFiblF1ZFdsa0lqb2lOMlUzT1RGaE1EVXRZamxsTnkwMFlqRm1MVGhrWm1NdE5UVTVabVV6TmpJd05EVm1JaXdpYzNWaUlqb2ljM2x6ZEdWdE9uTmxjblpwWTJWaFkyTnZkVzUwT210MVltVnlibVYwWlhNdFpHRnphR0p2WVhKa09tUmhjMmhpYjJGeVpDSjkuQVQ5REM2QzZweVlEbi13cVNsRXVJOWNUMG82UkVtREZWUk90ci1Ua0R4MU9pMFR6SXB2WWpwTXQzcF9XOFpyRjQ5Nk1JZVB5aXRfUHhwbTZnb2tDZFBiNHpwYlVIRjZudWpHSi1sdFFfenByTUc3NjBwdDhreERBOXltS1d3Y0FIQXNheDE2NUd3MTBPZVdKQVl2MjlmYTZSdkRNbjF3TXEzRFRIaXM3QUJfeGpPazFVMTl1RnhtbGxsR2t3d3dORVNzNk1OU2RuQVhiWG1nTFlrSC03SHJXd2dvZzl1X0pPWi1fUS00MjV1ZktNZTJlTUtUS3Ewa0R1V1VJWkJkSEViMEFPc1M2WG84TlZJd1Rqb0FLZGRoYVFCM1dJRWJaQUJWYmtmaDlsZXJhRjhDaWxmZUZtODhXZnJqNmx0dG9LelRVaVFpbktBSDVTcTFxVTlTRUhR
+
+
+kubectl -n kube-system get services
+kubectl get all -n kubernetes-dashboard
